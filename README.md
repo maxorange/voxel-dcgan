@@ -15,3 +15,9 @@ Experimental results on the <a href="http://shapenet.cs.stanford.edu/">ShapeNet<
 <img src="img/li-3.gif" width=200>
 <img src="img/li-4.gif" width=200>
 
+## Dependencies
+
+* tensorflow https://github.com/tensorflow/tensorflow
+* numpy https://github.com/numpy/numpy
+* binvox-rw-py https://github.com/dimatura/binvox-rw-py
+

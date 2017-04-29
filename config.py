@@ -1,2 +1,2 @@
 dataset_path = ""
-params_path = ""
+params_path = None

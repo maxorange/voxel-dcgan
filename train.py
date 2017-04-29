@@ -3,7 +3,7 @@ import numpy as np
 import model
 import util
 import dataset
-import time
+import config
 
 data = dataset.read()
 
@@ -42,12 +42,15 @@ opt_D = tf.train.AdamOptimizer(learning_rate, beta1).minimize(loss_D, var_list=v
 
 saver = tf.train.Saver()
 
-config = tf.ConfigProto()
-config.gpu_options.allow_growth = True
+config_proto = tf.ConfigProto()
+config_proto.gpu_options.allow_growth = True
 
-with tf.Session(config=config) as sess:
+with tf.Session(config=config_proto) as sess:
     sess.run(tf.initialize_all_variables())
     total_batch = data.train.num_examples / batch_size
+
+    if config.params_path is not None:
+        saver.restore(sess, config.params_path)
 
     for epoch in xrange(1, 51):
 

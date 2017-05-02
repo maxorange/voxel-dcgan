@@ -1,220 +1,168 @@
 import tensorflow as tf
-import numpy as np
+import config
 import util
+from ops import *
 
-def weight_variable(shape):
-    return tf.Variable(tf.random_normal(shape, stddev=0.02))
+class Model(object):
 
-def bias_variable(shape):
-    return tf.Variable(tf.constant(0.1, shape=shape))
+    def __init__(self, vars):
+        self.saver = tf.train.Saver(vars)
 
-def conv3d(x, W, stride=2):
-    return tf.nn.conv3d(x, W, strides=[1, stride, stride, stride, 1], padding='SAME')
+    def session(self, sess):
+        if sess is not None:
+            self.sess = sess
+        else:
+            config_proto = tf.ConfigProto()
+            config_proto.gpu_options.allow_growth = True
+            self.sess = tf.Session(config=config_proto)
 
-def deconv3d(x, W, output_shape, stride=2):
-    return tf.nn.conv3d_transpose(x, W, output_shape, strides=[1, stride, stride, stride, 1], padding='SAME')
+    def initialize(self):
+        self.sess.run(tf.global_variables_initializer())
 
-def lrelu(x, leak=0.2, name="lrelu"):
-    with tf.variable_scope(name):
-        f1 = 0.5 * (1 + leak)
-        f2 = 0.5 * (1 - leak)
-        return f1 * x + f2 * abs(x)
+    def save(self, path):
+        self.saver.save(self.sess, path)
 
-class BatchNormalization(object):
+    def restore(self, path):
+        self.saver.restore(self.sess, path)
 
-    def __init__(self, shape, name, decay=0.9, epsilon=1e-5):
-        with tf.variable_scope(name):
-            self.beta = tf.Variable(tf.constant(0.0, shape=shape), name="beta") # offset
-            self.gamma = tf.Variable(tf.constant(1.0, shape=shape), name="gamma") # scale
-            self.ema = tf.train.ExponentialMovingAverage(decay=decay)
-            self.epsilon = epsilon
+    def close(self):
+        self.sess.close()
 
-    def __call__(self, x, train):
-        self.train = train
-        n_axes = len(x.get_shape()) - 1
-        batch_mean, batch_var = tf.nn.moments(x, range(n_axes))
-        mean, variance = self.ema_mean_variance(batch_mean, batch_var)
-        return tf.nn.batch_normalization(x, mean, variance, self.beta, self.gamma, self.epsilon)
+class GAN(Model):
 
-    def ema_mean_variance(self, mean, variance):
-        def with_update():
-            ema_apply = self.ema.apply([mean, variance])
-            with tf.control_dependencies([ema_apply]):
-                return tf.identity(mean), tf.identity(variance)
-        return tf.cond(self.train, with_update, lambda: (self.ema.average(mean), self.ema.average(variance)))
+    def __init__(self, batch_size, nz, nvx, sess=None):
+        self.session(sess)
+        opt = tf.train.AdamOptimizer(2e-4, 0.5)
+        tower_gradsG = []
+        tower_gradsD = []
+        self.lossesG = []
+        self.lossesD = []
+        self.x_g_list = []
+        self.train = tf.placeholder(tf.bool)
+        self.netG = Generator()
+        self.netD = Discriminator()
 
-# code from https://github.com/openai/improved-gan
-class VirtualBatchNormalization(object):
+        self.build_model(batch_size, nz, nvx, 0)
+        gradsG = opt.compute_gradients(self.lossesG[-1], var_list=self.varsG)
+        gradsD = opt.compute_gradients(self.lossesD[-1], var_list=self.varsD)
+        tower_gradsG.append(gradsG)
+        tower_gradsD.append(gradsD)
 
-    def __init__(self, x, name, epsilon=1e-5, half=None):
-        """
-        x is the reference batch
-        """
-        assert isinstance(epsilon, float)
+        # multi-GPU mode
+        # gpus = ['/gpu:0', '/gpu:1']
+        # n_gpu = len(gpus)
+        # for i, gpu in enumerate(gpus):
+        #     with tf.device(gpu):
+        #         self.build_model(batch_size/n_gpu, nz, nvx, i)
+        #         gradsG = opt.compute_gradients(self.lossesG[-1], var_list=self.varsG)
+        #         gradsD = opt.compute_gradients(self.lossesD[-1], var_list=self.varsD)
+        #         tower_gradsG.append(gradsG)
+        #         tower_gradsD.append(gradsD)
 
-        self.half = half
-        shape = x.get_shape().as_list()
-        needs_reshape = len(shape) != 4
+        self.optG = opt.apply_gradients(average_gradients(tower_gradsG))
+        self.optD = opt.apply_gradients(average_gradients(tower_gradsD))
+        self.lossG = tf.reduce_mean(self.lossesG)
+        self.lossD = tf.reduce_mean(self.lossesD)
+        self.x_g = tf.concat(self.x_g_list, 0)
 
-        if needs_reshape:
-            orig_shape = shape
-            if len(shape) == 5:
-                x = tf.reshape(x, [shape[0], 1, shape[1]*shape[2]*shape[3], shape[4]])
-            elif len(shape) == 2:
-                x = tf.reshape(x, [shape[0], 1, 1, shape[1]])
-            elif len(shape) == 1:
-                x = tf.reshape(x, [shape[0], 1, 1, 1])
-            else:
-                assert False, shape
-            shape = x.get_shape().as_list()
+        if sess is None:
+            self.initialize()
 
-        with tf.variable_scope(name) as scope:
-            assert name.startswith("d_") or name.startswith("g_")
-            self.epsilon = epsilon
-            self.name = name
-            if self.half is None:
-                half = x
-            elif self.half == 1:
-                half = tf.slice(x, [0, 0, 0, 0], [shape[0] // 2, shape[1], shape[2], shape[3]])
-            elif self.half == 2:
-                half = tf.slice(x, [shape[0] // 2, 0, 0, 0], [shape[0] // 2, shape[1], shape[2], shape[3]])
-            else:
-                assert False
-            self.mean = tf.reduce_mean(half, [0, 1, 2], keep_dims=True)
-            self.mean_sq = tf.reduce_mean(tf.square(half), [0, 1, 2], keep_dims=True)
-            self.batch_size = int(half.get_shape()[0])
-            assert x is not None
-            assert self.mean is not None
-            assert self.mean_sq is not None
-            out = self._normalize(x, self.mean, self.mean_sq, "reference")
-            if needs_reshape:
-                out = tf.reshape(out, orig_shape)
-            self.reference_output = out
+        variables_to_save = self.varsG + self.varsD + tf.moving_average_variables()
+        super(GAN, self).__init__(variables_to_save)
 
-    def __call__(self, x):
-        shape = x.get_shape().as_list()
-        needs_reshape = len(shape) != 4
+    def build_model(self, batch_size, nz, nvx, gpu_idx):
+        reuse = False if gpu_idx == 0 else True
+        z = tf.placeholder(tf.float32, [batch_size, nz], 'z'+str(gpu_idx))
+        x = tf.placeholder(tf.float32, [batch_size, nvx, nvx, nvx, 1], 'x'+str(gpu_idx))
 
-        if needs_reshape:
-            orig_shape = shape
-            if len(shape) == 5:
-                x = tf.reshape(x, [shape[0], 1, shape[1]*shape[2]*shape[3], shape[4]])
-            elif len(shape) == 2:
-                x = tf.reshape(x, [shape[0], 1, 1, shape[1]])
-            elif len(shape) == 1:
-                x = tf.reshape(x, [shape[0], 1, 1, 1])
-            else:
-                assert False, shape
-            shape = x.get_shape().as_list()
+        # generator
+        x_g = self.netG(z, self.train, reuse=reuse)
+        self.x_g_list.append(x_g)
 
-        with tf.variable_scope(self.name, reuse=True) as scope:
-            new_coeff = 1. / (self.batch_size + 1.)
-            old_coeff = 1. - new_coeff
-            new_mean = tf.reduce_mean(x, [0, 1, 2], keep_dims=True)
-            new_mean_sq = tf.reduce_mean(tf.square(x), [0, 1, 2], keep_dims=True)
-            mean = new_coeff * new_mean + old_coeff * self.mean
-            mean_sq = new_coeff * new_mean_sq + old_coeff * self.mean_sq
-            out = self._normalize(x, mean, mean_sq, "live")
-            if needs_reshape:
-                out = tf.reshape(out, orig_shape)
-            return out
+        # discriminator
+        d_g = self.netD(x_g, self.train, reuse=reuse)
+        d_r = self.netD(x, self.train, reuse=True)
 
-    def _normalize(self, x, mean, mean_sq, message):
-        # make sure this is called with a variable scope
-        shape = x.get_shape().as_list()
-        assert len(shape) == 4
-        self.gamma = tf.get_variable("gamma", [shape[-1]], initializer=tf.random_normal_initializer(1., 0.02))
-        self.beta = tf.get_variable("beta", [shape[-1]], initializer=tf.constant_initializer(0.))
-        gamma = tf.reshape(self.gamma, [1, 1, 1, -1])
-        beta = tf.reshape(self.beta, [1, 1, 1, -1])
-        assert self.epsilon is not None
-        assert mean_sq is not None
-        assert mean is not None
-        std = tf.sqrt(self.epsilon + mean_sq - tf.square(mean))
-        out = x - mean
-        out = out / std
-        # out = tf.Print(out, [tf.reduce_mean(out, [0, 1, 2]),
-        #    tf.reduce_mean(tf.square(out - tf.reduce_mean(out, [0, 1, 2], keep_dims=True)), [0, 1, 2])],
-        #    message, first_n=-1)
-        out = out * gamma
-        out = out + beta
-        return out
+        if gpu_idx == 0:
+            t_vars = tf.trainable_variables()
+            self.varsG = [var for var in t_vars if var.name.startswith('G')]
+            self.varsD = [var for var in t_vars if var.name.startswith('D')]
 
-def vbn(x, name):
-    f = VirtualBatchNormalization(x, name)
-    return f(x)
+        # generator loss
+        lossG_adv = tf.reduce_mean(sigmoid_kl_with_logits(d_g, 0.8))
+        weight_decayG = tf.add_n([tf.nn.l2_loss(var) for var in self.varsG])
+        self.lossesG.append(lossG_adv + 5e-4*weight_decayG)
+
+        # discriminator loss
+        lossD_real = tf.reduce_mean(sigmoid_kl_with_logits(d_r, 0.8))
+        lossD_fake = tf.reduce_mean(sigmoid_ce_with_logits(d_g, tf.zeros_like(d_g)))
+        weight_decayD = tf.add_n([tf.nn.l2_loss(var) for var in self.varsD])
+        self.lossesD.append(lossD_real + lossD_fake + 5e-4*weight_decayD)
+
+    def optimize(self, z, x):
+        fd = {'z0:0':z, 'x0:0':x, self.train:True}
+        # fd = {'z0:0':z[0], 'z1:0':z[1], 'x0:0':x[0], 'x1:0':x[1], self.train:True} # multi-GPU mode
+        self.sess.run(self.optD, feed_dict=fd)
+        self.sess.run(self.optG, feed_dict=fd)
+
+    def get_errors(self, z, x):
+        fd = {'z0:0':z, 'x0:0':x, self.train:False}
+        # fd = {'z0:0':z[0], 'z1:0':z[1], 'x0:0':x[0], 'x1:0':x[1], self.train:False} # multi-GPU mode
+        lossD = self.sess.run(self.lossD, feed_dict=fd)
+        lossG = self.sess.run(self.lossG, feed_dict=fd)
+        return lossD, lossG
+
+    def generate(self, z):
+        x_g = self.sess.run(self.x_g, feed_dict={'z0:0':z, self.train:False})
+        # x_g = self.sess.run(self.x_g, feed_dict={'z0:0':z[0], 'z1:0':z[1], self.train:False}) # multi-GPU mode
+        return x_g[:, :, :, :, 0]
 
 class Generator(object):
 
-    def __init__(self, z_size, name="g_"):
-        with tf.variable_scope(name):
-            self.name = name
+    def __call__(self, z, train, nf=32, name="G", reuse=False):
+        with tf.variable_scope(name, reuse=reuse):
+            batch_size, nz = z.get_shape().as_list()
 
-            self.W = {
-                'h1': weight_variable([z_size, 2*2*2*128]),
-                'h2': weight_variable([4, 4, 4, 64, 128]),
-                'h3': weight_variable([4, 4, 4, 32, 64]),
-                'h4': weight_variable([4, 4, 4, 16, 32]),
-                'h5': weight_variable([4, 4, 4, 1, 16])
-            }
+            u = linear(z, [nz, 4*4*4*nf*8], 'h1')
+            h = tf.nn.relu(batch_norm(u, train, 'bn1'))
 
-            self.b = {
-                'h5': bias_variable([1])
-            }
+            h = tf.reshape(h, [batch_size, 4, 4, 4, nf*8])
 
-    def __call__(self, z):
-        shape = z.get_shape().as_list()
+            u = deconv3d(h, [4, 4, 4, nf*4, nf*8], [batch_size, 8, 8, 8, nf*4], 'h2')
+            h = tf.nn.relu(batch_norm(u, train, 'bn2'))
 
-        h = tf.nn.relu(vbn(tf.matmul(z, self.W['h1']), 'g_vbn_1'))
-        h = tf.reshape(h, [-1, 2, 2, 2, 128])
-        h = tf.nn.relu(vbn(deconv3d(h, self.W['h2'], [shape[0], 4, 4, 4, 64]), 'g_vbn_2'))
-        h = tf.nn.relu(vbn(deconv3d(h, self.W['h3'], [shape[0], 8, 8, 8, 32]), 'g_vbn_3'))
-        h = tf.nn.relu(vbn(deconv3d(h, self.W['h4'], [shape[0], 16, 16, 16, 16]), 'g_vbn_4'))
-        x = tf.nn.tanh(deconv3d(h, self.W['h5'], [shape[0], 32, 32, 32, 1]) + self.b['h5'])
-        return x
+            u = deconv3d(h, [4, 4, 4, nf*2, nf*4], [batch_size, 16, 16, 16, nf*2], 'h3')
+            h = tf.nn.relu(batch_norm(u, train, 'bn3'))
+
+            u = deconv3d(h, [4, 4, 4, nf, nf*2], [batch_size, 32, 32, 32, nf], 'h4')
+            h = tf.nn.relu(batch_norm(u, train, 'bn4'))
+
+            u = deconv3d(h, [4, 4, 4, 1, nf], [batch_size, 32, 32, 32, 1], 'h5', bias=True, stride=1)
+            return tf.nn.sigmoid(u)
 
 class Discriminator(object):
 
-    def __init__(self, name="d_"):
-        with tf.variable_scope(name):
-            self.name = name
-            self.n_kernels = 300
-            self.dim_per_kernel = 50
+    def __call__(self, x, train, nf=32, name="D", reuse=False):
+        with tf.variable_scope(name, reuse=reuse):
+            batch_size = x.get_shape().as_list()[0]
 
-            self.W = {
-                'h1': weight_variable([4, 4, 4, 1, 16]),
-                'h2': weight_variable([4, 4, 4, 16, 32]),
-                'h3': weight_variable([4, 4, 4, 32, 64]),
-                'h4': weight_variable([4, 4, 4, 64, 128]),
-                'h5': weight_variable([2*2*2*128+self.n_kernels, 2]),
-                'md': weight_variable([2*2*2*128, self.n_kernels*self.dim_per_kernel])
-            }
+            x *= binary_mask(x.get_shape())
 
-            self.b = {
-                'h1': bias_variable([16]),
-                'h5': bias_variable([2]),
-                'md': bias_variable([self.n_kernels])
-            }
+            u = conv3d(x, [4, 4, 4, 1, nf], 'h1', bias=True, stride=1)
+            h = lrelu(u)
 
-            self.bn2 = BatchNormalization([32], 'bn2')
-            self.bn3 = BatchNormalization([64], 'bn3')
-            self.bn4 = BatchNormalization([128], 'bn4')
+            u = conv3d(h, [4, 4, 4, nf, nf*2], 'h2')
+            h = lrelu(batch_norm(u, train, 'bn2'))
 
-    def __call__(self, x, train):
-        shape = x.get_shape().as_list()
-        noisy_x = x + tf.random_normal([shape[0], 32, 32, 32, 1])
+            u = conv3d(h, [4, 4, 4, nf*2, nf*4], 'h3')
+            h = lrelu(batch_norm(u, train, 'bn3'))
 
-        h = lrelu(conv3d(noisy_x, self.W['h1']) + self.b['h1'])
-        h = lrelu(self.bn2(conv3d(h, self.W['h2']), train))
-        h = lrelu(self.bn3(conv3d(h, self.W['h3']), train))
-        h = lrelu(self.bn4(conv3d(h, self.W['h4']), train))
-        h = tf.reshape(h, [-1, 2*2*2*128])
+            u = conv3d(h, [4, 4, 4, nf*4, nf*8], 'h4')
+            h = lrelu(batch_norm(u, train, 'bn4'))
 
-        m = tf.matmul(h, self.W['md'])
-        m = tf.reshape(m, [-1, self.n_kernels, self.dim_per_kernel])
-        abs_dif = tf.reduce_sum(tf.abs(tf.expand_dims(m, 3) - tf.expand_dims(tf.transpose(m, [1, 2, 0]), 0)), 2)
-        f = tf.reduce_sum(tf.exp(-abs_dif), 2) + self.b['md']
+            h = tf.reshape(h, [batch_size, -1])
+            h = minibatch_discrimination(h, 300, 50, 'md1')
 
-        h = tf.concat(1, [h, f])
-        y = tf.matmul(h, self.W['h5']) + self.b['h5']
-        return y
+            ni = h.get_shape().as_list()[1]
+            return linear(h, [ni, 1], 'h5', bias=True)

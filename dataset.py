@@ -1,18 +1,18 @@
 import numpy as np
-import collections
 import glob
+import os
 import util
 import config
 
-Datasets = collections.namedtuple('Datasets', ['train'])
-
 class Dataset:
 
-    def __init__(self):
+    def __init__(self, path):
         self.index_in_epoch = 0
-        self.examples = np.array(glob.glob(config.dataset_path))
+        self.examples = np.array(glob.glob(path))
         self.num_examples = len(self.examples)
         np.random.shuffle(self.examples)
+        print "dataset path:", path
+        print "number of examples:", self.num_examples
 
     def next_batch(self, batch_size):
         start = self.index_in_epoch
@@ -29,12 +29,6 @@ class Dataset:
 
     def read_data(self, start, end):
         data = []
-
         for fname in self.examples[start:end]:
             data.append(util.read_binvox(fname))
-
         return np.array(data)
-
-def read():
-    train = Dataset()
-    return Datasets(train=train)

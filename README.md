@@ -10,10 +10,14 @@ Experimental results on <a href="http://shapenet.cs.stanford.edu/">ShapeNetCore<
 
 ### Linear interpolation
 
-<img src="img/li-1.gif" width="200">
-<img src="img/li-2.gif" width="200">
-<img src="img/li-3.gif" width="200">
-<img src="img/li-4.gif" width="200">
+<table>
+<tr>
+<td><img src="img/li-1.gif" width="200"></td>
+<td><img src="img/li-2.gif" width="200"></td>
+<td><img src="img/li-3.gif" width="200"></td>
+<td><img src="img/li-4.gif" width="200"></td>
+</tr>
+</table>
 
 ### Real-time generation
 
@@ -52,7 +56,7 @@ $ pip install qdarkstyle
 ## Getting started
 
 1. Install the python packages above.
-2. Download the code from GitHub.
+2. Download the code from GitHub:
 ```
 $ git clone https://github.com/maxorange/voxel-dcgan.git
 $ cd voxel-dcgan

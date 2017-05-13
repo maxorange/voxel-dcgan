@@ -118,6 +118,31 @@ class GAN(Model):
         # x_g = self.sess.run(self.x_g, feed_dict={'z0:0':z[0], 'z1:0':z[1], self.train:False}) # multi-GPU mode
         return x_g[:, :, :, :, 0]
 
+class GANTest(Model):
+
+    def __init__(self, batch_size, nz, sess=None):
+        self.session(sess)
+        self.batch_size = batch_size
+        self.nz = nz
+        self.train = tf.placeholder(tf.bool)
+        self.netG = Generator()
+        self.build_model()
+
+        if sess is None:
+            self.initialize()
+
+        variables_to_save = self.varsG + tf.moving_average_variables()
+        super(GANTest, self).__init__(variables_to_save)
+
+    def build_model(self):
+        z = tf.placeholder(tf.float32, [self.batch_size, self.nz], 'z')
+        self.x_g = self.netG(z, self.train)
+        self.varsG = [var for var in tf.trainable_variables() if var.name.startswith('G')]
+
+    def generate(self, z):
+        x_g = self.sess.run(self.x_g, feed_dict={'z:0':z, self.train:False})
+        return x_g[0, :, :, :, 0] > 0.9
+
 class Generator(object):
 
     def __call__(self, z, train, nf=32, name="G", reuse=False):

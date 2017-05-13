@@ -48,3 +48,30 @@ $ conda install -c anaconda pyqt=4.11.4
 ```
 $ pip install qdarkstyle
 ```
+
+## Getting started
+
+1. Install the python packages above.
+2. Download the code from GitHub.
+```
+$ git clone https://github.com/maxorange/voxel-dcgan.git
+$ cd voxel-dcgan
+```
+3. Specify dataset path and model path in ```config.py```:
+```python
+...
+dataset_path = "path/to/dataset/*.binvox"
+params_path = "path/to/model"
+...
+```
+4. Train the networks:
+```
+$ python train.py
+```
+5. Generate data:
+```
+$ python visualize.py
+or
+$ python application.py
+```
+More details are [here](https://github.com/maxorange/voxel-dcgan/wiki/How-to-run-the-code).

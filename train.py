@@ -5,7 +5,7 @@ import config
 from model import *
 from dataset import *
 
-model = GAN(config.batch_size, config.nz, config.nvx)
+model = DCGAN(config.nz, config.nsf, config.nvx, config.batch_size, config.learning_rate)
 dataset = Dataset(config.dataset_path)
 total_batch = dataset.num_examples / config.batch_size
 

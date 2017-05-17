@@ -9,7 +9,7 @@ netG = Generator()
 z = tf.placeholder(tf.float32, [config.batch_size, config.nz])
 train = tf.placeholder(tf.bool)
 
-x = netG(z, train)
+x = netG(z, train, config.nsf, config.nvx)
 
 t_vars = tf.trainable_variables()
 varsG = [var for var in t_vars if var.name.startswith('G')]

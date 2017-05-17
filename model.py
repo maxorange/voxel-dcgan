@@ -1,5 +1,4 @@
 import tensorflow as tf
-import config
 import util
 from ops import *
 
@@ -28,11 +27,11 @@ class Model(object):
     def close(self):
         self.sess.close()
 
-class GAN(Model):
+class DCGAN(Model):
 
-    def __init__(self, batch_size, nz, nvx, sess=None):
+    def __init__(self, nz, nsf, nvx, batch_size, learning_rate, sess=None):
         self.session(sess)
-        opt = tf.train.AdamOptimizer(2e-4, 0.5)
+        opt = tf.train.AdamOptimizer(learning_rate, 0.5)
         tower_gradsG = []
         tower_gradsD = []
         self.lossesG = []
@@ -42,7 +41,7 @@ class GAN(Model):
         self.netG = Generator()
         self.netD = Discriminator()
 
-        self.build_model(batch_size, nz, nvx, 0)
+        self.build_model(nz, nsf, nvx, batch_size, 0)
         gradsG = opt.compute_gradients(self.lossesG[-1], var_list=self.varsG)
         gradsD = opt.compute_gradients(self.lossesD[-1], var_list=self.varsD)
         tower_gradsG.append(gradsG)
@@ -53,7 +52,7 @@ class GAN(Model):
         # n_gpu = len(gpus)
         # for i, gpu in enumerate(gpus):
         #     with tf.device(gpu):
-        #         self.build_model(batch_size/n_gpu, nz, nvx, i)
+        #         self.build_model(nz, nsf, nvx, batch_size/n_gpu, i)
         #         gradsG = opt.compute_gradients(self.lossesG[-1], var_list=self.varsG)
         #         gradsD = opt.compute_gradients(self.lossesD[-1], var_list=self.varsD)
         #         tower_gradsG.append(gradsG)
@@ -69,20 +68,20 @@ class GAN(Model):
             self.initialize()
 
         variables_to_save = self.varsG + self.varsD + tf.moving_average_variables()
-        super(GAN, self).__init__(variables_to_save)
+        super(DCGAN, self).__init__(variables_to_save)
 
-    def build_model(self, batch_size, nz, nvx, gpu_idx):
+    def build_model(self, nz, nsf, nvx, batch_size, gpu_idx):
         reuse = False if gpu_idx == 0 else True
         z = tf.placeholder(tf.float32, [batch_size, nz], 'z'+str(gpu_idx))
         x = tf.placeholder(tf.float32, [batch_size, nvx, nvx, nvx, 1], 'x'+str(gpu_idx))
 
         # generator
-        x_g = self.netG(z, self.train, reuse=reuse)
+        x_g = self.netG(z, self.train, nsf, nvx, reuse=reuse)
         self.x_g_list.append(x_g)
 
         # discriminator
-        d_g = self.netD(x_g, self.train, reuse=reuse)
-        d_r = self.netD(x, self.train, reuse=True)
+        d_g = self.netD(x_g, self.train, nsf, nvx, reuse=reuse)
+        d_r = self.netD(x, self.train, nsf, nvx, reuse=True)
 
         if gpu_idx == 0:
             t_vars = tf.trainable_variables()
@@ -118,25 +117,25 @@ class GAN(Model):
         # x_g = self.sess.run(self.x_g, feed_dict={'z0:0':z[0], 'z1:0':z[1], self.train:False}) # multi-GPU mode
         return x_g[:, :, :, :, 0]
 
-class GANTest(Model):
+class DCGANTest(Model):
 
-    def __init__(self, batch_size, nz, sess=None):
+    def __init__(self, nz, nsf, nvx, batch_size, sess=None):
         self.session(sess)
         self.batch_size = batch_size
         self.nz = nz
         self.train = tf.placeholder(tf.bool)
         self.netG = Generator()
-        self.build_model()
+        self.build_model(nsf, nvx)
 
         if sess is None:
             self.initialize()
 
         variables_to_save = self.varsG + tf.moving_average_variables()
-        super(GANTest, self).__init__(variables_to_save)
+        super(DCGANTest, self).__init__(variables_to_save)
 
-    def build_model(self):
+    def build_model(self, nsf, nvx):
         z = tf.placeholder(tf.float32, [self.batch_size, self.nz], 'z')
-        self.x_g = self.netG(z, self.train)
+        self.x_g = self.netG(z, self.train, nsf, nvx)
         self.varsG = [var for var in tf.trainable_variables() if var.name.startswith('G')]
 
     def generate(self, z):
@@ -145,49 +144,48 @@ class GANTest(Model):
 
 class Generator(object):
 
-    def __call__(self, z, train, nf=32, name="G", reuse=False):
+    def __call__(self, z, train, nsf, nvx, name="G", reuse=False):
         with tf.variable_scope(name, reuse=reuse):
             batch_size, nz = z.get_shape().as_list()
+            nf = 256 # number of filters
+            layer_idx = 1
 
-            u = linear(z, [nz, 4*4*4*nf*8], 'h1')
-            h = tf.nn.relu(batch_norm(u, train, 'bn1'))
+            u = linear(z, [nz, nsf*nsf*nsf*nf], 'h{0}'.format(layer_idx))
+            h = tf.nn.relu(batch_norm(u, train, 'bn{0}'.format(layer_idx)))
+            h = tf.reshape(h, [batch_size, nsf, nsf, nsf, nf])
 
-            h = tf.reshape(h, [batch_size, 4, 4, 4, nf*8])
+            while nsf < nvx:
+                layer_idx += 1
+                u = deconv3d(h, [4, 4, 4, nf/2, nf], [batch_size, nsf*2, nsf*2, nsf*2, nf/2], 'h{0}'.format(layer_idx))
+                h = tf.nn.relu(batch_norm(u, train, 'bn{0}'.format(layer_idx)))
+                _, _, _, nsf, nf = h.get_shape().as_list()
 
-            u = deconv3d(h, [4, 4, 4, nf*4, nf*8], [batch_size, 8, 8, 8, nf*4], 'h2')
-            h = tf.nn.relu(batch_norm(u, train, 'bn2'))
-
-            u = deconv3d(h, [4, 4, 4, nf*2, nf*4], [batch_size, 16, 16, 16, nf*2], 'h3')
-            h = tf.nn.relu(batch_norm(u, train, 'bn3'))
-
-            u = deconv3d(h, [4, 4, 4, nf, nf*2], [batch_size, 32, 32, 32, nf], 'h4')
-            h = tf.nn.relu(batch_norm(u, train, 'bn4'))
-
-            u = deconv3d(h, [4, 4, 4, 1, nf], [batch_size, 32, 32, 32, 1], 'h5', bias=True, stride=1)
+            layer_idx += 1
+            u = deconv3d(h, [4, 4, 4, 1, nf], [batch_size, nvx, nvx, nvx, 1], 'h{0}'.format(layer_idx), bias=True, stride=1)
             return tf.nn.sigmoid(u)
 
 class Discriminator(object):
 
-    def __call__(self, x, train, nf=32, name="D", reuse=False):
+    def __call__(self, x, train, nsf, nvx, name="D", reuse=False):
         with tf.variable_scope(name, reuse=reuse):
-            batch_size = x.get_shape().as_list()[0]
+            batch_size, _, _, _, _ = x.get_shape().as_list()
+            nf = 32 # number of filters
+            layer_idx = 1
 
             x *= binary_mask(x.get_shape())
 
-            u = conv3d(x, [4, 4, 4, 1, nf], 'h1', bias=True, stride=1)
+            u = conv3d(x, [4, 4, 4, 1, nf], 'h{0}'.format(layer_idx), bias=True, stride=1)
             h = lrelu(u)
 
-            u = conv3d(h, [4, 4, 4, nf, nf*2], 'h2')
-            h = lrelu(batch_norm(u, train, 'bn2'))
-
-            u = conv3d(h, [4, 4, 4, nf*2, nf*4], 'h3')
-            h = lrelu(batch_norm(u, train, 'bn3'))
-
-            u = conv3d(h, [4, 4, 4, nf*4, nf*8], 'h4')
-            h = lrelu(batch_norm(u, train, 'bn4'))
+            while nsf < nvx:
+                layer_idx += 1
+                u = conv3d(h, [4, 4, 4, nf, nf*2], 'h{0}'.format(layer_idx))
+                h = lrelu(batch_norm(u, train, 'bn{0}'.format(layer_idx)))
+                _, _, _, nvx, nf = h.get_shape().as_list()
 
             h = tf.reshape(h, [batch_size, -1])
             h = minibatch_discrimination(h, 300, 50, 'md1')
 
-            ni = h.get_shape().as_list()[1]
-            return linear(h, [ni, 1], 'h5', bias=True)
+            layer_idx += 1
+            _, nf = h.get_shape().as_list()
+            return linear(h, [nf, 1], 'h{0}'.format(layer_idx), bias=True)
